@@ -1,0 +1,16 @@
+# pyproject.toml
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[project]
+name = "mcp_fileserver"
+version = "1.0.0"
+# Add your active dependencies here so they install automatically
+dependencies = [
+    "mcp",  
+]
+
+[project.scripts]
+mcp-file-server = "mcp_fs.mcp_fs_server:run_server"
+mcp-file-client = "mcp_fs.mcp_fs_client:client"
