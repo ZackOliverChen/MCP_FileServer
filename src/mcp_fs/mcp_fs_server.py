@@ -1,99 +1,235 @@
-# --- Standard library imports ---
-import os
-from pathlib import Path   # object-oriented filesystem paths
+import mimetypes
+import base64
+from pathlib import Path
+import re
+import shutil   # object-oriented filesystem paths
+from mcp.server import MCPServer
+import logging
 
-# --- Third-party import: FastMCP ---
-# FastMCP is a high-level wrapper around the raw MCP SDK. It turns ordinary
-# Python functions into MCP "tools" automatically and handles all the
-# JSON-RPC wire protocol, the initialize handshake, tools/list, tools/call,
-# and the HTTP server plumbing for us. Install:  pip install "mcp[cli]"
-from mcp.server.fastmcp import FastMCP
-
-
-# ROOT is the folder this file lives in. We use __file__ so it works no matter
-# where the file is copied. .resolve() turns it into an absolute path
-# (no ".." or symlink surprises).
-ROOT = Path(__file__).resolve().parent
+from .checksumdb import ChecksumDB, calculate_bytes_checksum
+from .config import MCP_FS_ROOT_DIR, MCP_FS_DB_FILE, MCP_FS_PRIVATE_DIR
 
 
-# Create the FastMCP server object.
-#   - name: identifier shown to the client
-#   - host/port: bind to loopback (127.0.0.1) only, port 8123. Loopback means
-#     only THIS machine can reach it — that's fine because the openclaw
-#     client runs on the same box.
-mcp = FastMCP(
-    "scoped-fs",
-    host="127.0.0.1",
-    port=8123,
-)
+
+mcp = MCPServer("mcp-fs")
+db = ChecksumDB(MCP_FS_DB_FILE)
 
 
-# --- The single most important function: the scoping gate ---
 # resolve() takes a caller-supplied relative path string and returns a safe
 # absolute Path that is GUARANTEED to live inside ROOT.
-# This is the only place in the whole file where we touch user input paths,
-# so it's the only bottleneck we need to get right.
 def resolve(rel: str) -> Path:
-    # 1. Join the relative path onto ROOT and normalize (remove any ../ etc.)
-    #    with .resolve().
-    candidate = (ROOT / rel).resolve()
+    # Strip leading slashes to force the path to be relative
+    safe_rel = rel.lstrip("/")
+    candidate = (MCP_FS_ROOT_DIR / safe_rel).resolve()
 
-    # 2. Guard: is_relative_to() checks whether `candidate` is inside ROOT.
+    # Guard: is_relative_to() checks whether `candidate` is inside ROOT.
     #    If the caller passed "../../etc/passwd", resolve() would normalize
-    #    it to /home/zack/etc/passwd and is_relative_to(ROOT) is False.
-    #    We refuse before any disk access happens.
-    if not candidate.is_relative_to(ROOT):
+    #    it to /home/user/etc/passwd and is_relative_to(ROOT) is False.
+    #    Refuse before any disk access happens.
+    if not candidate.is_relative_to(MCP_FS_ROOT_DIR):
         raise PermissionError(f"Path escapes allowed root: {rel}")
 
-    # 3. Safe — hand back the resolved path.
+    if candidate == MCP_FS_PRIVATE_DIR or MCP_FS_PRIVATE_DIR in candidate.parents:
+        raise PermissionError("Access denied: This system resource is restricted.")
+    
     return candidate
 
 
 # --- Tool #1: read_file ---
-# The @mcp.tool() decorator registers this function as an MCP tool. FastMCP
-# reads the Python type hint `path: str` and builds the JSON inputSchema the
-# client needs.
 @mcp.tool()
-def read_file(path: str) -> str:
-    """Read a text file inside the confined folder and return its contents."""
-    # resolve() enforces the boundary; .read_text() reads the whole file
-    # as a string. If the file doesn't exist it raises, which FastMCP turns
-    # into an error response to the client.
-    return resolve(path).read_text()
+def read_file(path: str) -> tuple[bool, str]:
+    """
+    Read a text file inside the confined folder.
+    Args:
+        path (str): The relative path from the server root path.
+    Returns: tuple[bool, str] 
+        bool: A boolean indicating success.
+        str: The raw text content if the file is a text file (UTF-8). 
+             If the file is binary (like an image, PDF, or archive), 
+             it returns a Base64-encoded Data URI string in the format:
+             'data:<mime-type>;base64,<data>'
+             If an error occurs (the first element of the returned tuple is False), 
+                it returns an error explanation string.
+     """
+    try:
+        target_path = resolve(path)
+        
+        if not target_path.exists():
+            return False, f"Error: File '{path}' does not exist."
+            
+        if not target_path.is_file():
+            return False, f"Error: '{path}' is a directory, not a file."
 
+        mime_type, _ = mimetypes.guess_type(target_path)
+        is_text = mime_type and (mime_type.startswith("text/") or mime_type in ["application/json", "application/javascript"])
+
+        if is_text or mime_type is None: 
+            try:
+                return True, target_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # Fallback to binary if UTF-8 decoding fails unexpectedly
+                pass
+
+        binary_data = target_path.read_bytes()
+        encoded_base64 = base64.b64encode(binary_data).decode("utf-8")
+        return True, f"data:{mime_type};base64,{encoded_base64}"
+        
+    except Exception as e:
+        logging.error(f"Failed to read file '{path}': {e}")
+        return False, f"Error: Failed to read file. {str(e)}"
+    
 
 # --- Tool #2: write_file ---
 @mcp.tool()
-def write_file(path: str, content: str) -> str:
-    """Write a file inside the confined folder, creating directories as needed."""
-    # resolve() to get the safe location...
-    target = resolve(path)
+def write_file(path: str, content: str) -> tuple[bool, str]:
+    """
+    Write a file inside the confined folder, creating directories as needed.
+    Accepts raw text or Base64-encoded Data URIs for binary files.
+    Args:
+        path (str): The relative path from the server root path.
+        content (str): The text content or a 'data:<mime>;base64,...' Data URI.
+    Returns: tuple[bool, str]
+        bool: A boolean indicating success.
+        str: The error message if the operation failed.
+    """
+    try:
+        target = resolve(path)
 
-    # ...then make sure the parent directories exist (mkdir parents=True,
-    # exist_ok=True means "don't error if they're already there"). This lets
-    # a caller write src/sub/file.txt even if src/sub doesn't exist yet.
-    target.parent.mkdir(parents=True, exist_ok=True)
+        data_uri_match = re.match(r"^data:[^;]+;base64,(.+)$", content.strip())    
+        if data_uri_match:
+            # It's a binary file sent as base64
+            base64_data = data_uri_match.group(1)
+            file_bytes = base64.b64decode(base64_data)
+        else:
+            # It's standard text content
+            file_bytes = content.encode("utf-8")    
 
-    # Write the text. Returns a short confirmation string.
-    target.write_text(content)
-    return f"wrote {path}"
+        if target.exists():
+            last_recorded_checksum = db.get_checksum(str(target)) 
+            if last_recorded_checksum is None:
+                return False, "Error: Cannot overwrite file. The file may have been created externally."    
+            # The file was not created by this server.
 
+            current_actual_content = target.read_bytes()
+            current_checksum = calculate_bytes_checksum(current_actual_content)
+            if current_checksum != last_recorded_checksum:
+                return False, "Error: Cannot overwrite file. The file may have been modified externally."
+            # The file was modified externally since the last known checksum.
 
-# --- Tool #3: list_dir ---
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(file_bytes)
+
+        # Log database checksum details
+        new_checksum = calculate_bytes_checksum(file_bytes)
+        db.save_checksum(str(target), new_checksum)
+
+        return True, "File written successfully."
+        
+    except Exception as e:
+        logging.error(f"Failed to write file '{path}': {e}")
+        return False, f"Error: Failed to write file. {str(e)}"
+
+# --- Tool #4: move_file ---
 @mcp.tool()
-def list_dir(path: str = ".") -> list[str]:
-    """List every file/folder under a path inside the confined folder."""
-    # Default to ROOT itself if no path given (".").
-    directory = resolve(path)
+def move_file(source_path: str, destination_path: str) -> tuple[bool, str]:
+    """
+    Move or rename a file inside the confined folder.
+    If the destination is an existing directory, the file is moved inside it.
+    Args:
+        source_path (str): The relative path of the file to move.
+        destination_path (str): The relative destination path or directory.
+    Returns: tuple[bool, str]
+        bool: True if the file was moved successfully, False otherwise.
+        str: The error message if the operation failed.
+    """
+    try:
+        source = resolve(source_path)
+        destination = resolve(destination_path)
 
-    # rglob("*") recursively walks everything under `directory`.
-    # For each match, we compute its path relative to ROOT so the caller gets
-    # clean relative names, then sort them alphabetically.
-    return sorted(str(item.relative_to(ROOT)) for item in directory.rglob("*"))
+        if not source.exists() or not source.is_file():
+            return False, "Error: Source file does not exist or is not a file."
 
+        if destination.exists():
+            if destination.is_dir():
+                destination = destination / source.name
+                if not destination.is_relative_to(MCP_FS_ROOT_DIR):
+                    return False, "Error: Destination is outside the confined folder."
+                if destination == MCP_FS_PRIVATE_DIR or MCP_FS_PRIVATE_DIR in destination.parents:
+                    return False, "Error: Cannot move file to private directory."
 
-def run_server():
-    ROOT = os.getenv("MCP_FS_ROOT_PATH", os.path.expanduser("~"))
+            if destination.exists():
+                last_recorded_checksum = db.get_checksum(str(destination))
+                if last_recorded_checksum is None:
+                    return False, "Error: Can not move file. The destination file can not be overwritten."
 
-    print(f"scoped-fs serving {ROOT} -> http://127.0.0.1:8123/mcp")
-    mcp.run(transport="streamable-http")
+                current_actual_content = destination.read_bytes()
+                current_checksum = calculate_bytes_checksum(current_actual_content)
+                if current_checksum != last_recorded_checksum:
+                    return False, "Error: Can not move file. The destination file may have been created or modified externally."
+
+        file_bytes = source.read_bytes()
+        current_source_checksum = calculate_bytes_checksum(file_bytes)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+
+        db.delete_checksum(str(source))
+        db.save_checksum(str(destination), current_source_checksum)
+        return True, "File moved successfully."
+
+    except Exception as e:
+        logging.error(f"Failed to move file from '{source_path}' to '{destination_path}': {e}")
+        return False, f"Error: Failed to move file. {str(e)}"
+
+# --- Tool #5: list_dir ---
+@mcp.tool()
+def list_dir(path: str = ".", recursive: bool = False) -> tuple[bool, str, list[str]]:
+    """
+    List files and folders under a path inside the confined folder.
+    Args:
+        path (str): The relative path from the server root path. Defaults to ".".
+        recursive (bool): True to list everything deeply; False to list only immediate contents.
+    Returns: tuple[bool, str, list[str]]
+        bool: True if the operation was successful, False otherwise.
+        str: A message describing the result.
+        list[str]: Alphabetically sorted relative paths from the server root.
+                   If an error occurs or path is invalid, returns an empty list.
+    """
+    try:
+        directory = resolve(path)
+        if not directory.is_dir():
+            return False, "Error: Invalid directory path.", []
+
+        iterator = directory.rglob("*") if recursive else directory.glob("*")
+
+        results = []
+        for item in iterator:
+            if item == MCP_FS_PRIVATE_DIR or MCP_FS_PRIVATE_DIR in item.parents:
+                continue
+            try:
+                # Always ensure the output is clean and relative to the ROOT
+                rel_path = str(item.relative_to(MCP_FS_ROOT_DIR))
+                results.append(rel_path)
+            except ValueError:
+                continue
+
+        results.sort()
+        return True, "Directory listed successfully.", results
+
+    except Exception as e:
+        return False, f"Error: Failed to list directory. {str(e)}", []
+
+def run_server(host: str = "127.0.0.1", port: int = 8123) -> None:
+    global MCP_FS_ROOT_DIR
+    # Validate the host and port
+    if not isinstance(host, str) or not host:
+        raise ValueError(f"Invalid host: {host}")
+    if not isinstance(port, int) or not (0 < port < 65536):
+        raise ValueError(f"Invalid port: {port}")   
+    print(f"mcp-fileserver serving {MCP_FS_ROOT_DIR} -> http://{host}:{port}/mcp")
+
+    kwargs = {"host": host, "port": port}
+    mcp.run(transport="streamable-http",**kwargs)
+
+if __name__ == "__main__":
+    run_server()

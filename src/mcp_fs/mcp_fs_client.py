@@ -1,7 +1,8 @@
 # mcp_client.py
+# Client module under construction
 import asyncio
 from mcp.client.streamable_http import streamablehttp_client
-from mcp import ClientSession
+from mcp.client.session import ClientSession
 
 async def main():
     # 1. Connect over HTTP

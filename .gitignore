@@ -13,3 +13,9 @@ ENV/
 
 # Environment variables / Secrets
 .env
+
+# VS Code settings
+.vscode/
+
+# Test data directory
+test/test_dir/

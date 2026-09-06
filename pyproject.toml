@@ -3,14 +3,35 @@
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 
+
 [project]
-name = "mcp_fileserver"
-version = "1.0.0"
-# Add your active dependencies here so they install automatically
-dependencies = [
-    "mcp",  
+description = "A MCP file server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Zack", email = "zackoliverchen@gmail.com" }
 ]
+keywords = ["mcp", "file server", "checksum database"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Users",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+]
+name = "mcp_fs"
+version = "1.0.3"
+dependencies = [
+    "mcp[cli]>=0.1.0",  
+]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 
 [project.scripts]
 mcp-file-server = "mcp_fs.mcp_fs_server:run_server"
+mcp-file-server-maintain = "mcp_fs.checksumdb_maintain:db_maintain_cli"
 mcp-file-client = "mcp_fs.mcp_fs_client:client"
