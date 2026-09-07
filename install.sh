@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 
+# Helper for showing script usage instructions
+usage() {
+    echo "Usage: sudo $0 [-w wheel_file] [-i ip_address] [-p port] [-f]"
+    echo "  -w: Path to a specific .whl file (optional; auto-detects in 'dist/' if omitted)"
+    echo "  -i: IP address to bind to (default: 127.0.0.1)"
+    echo "  -p: Port number to listen on (default: 8123)"
+    echo "  -f: Force reinstall of the application package"
+    exit 1
+}
+
+
 # Exit immediately if a command exits with a non-zero status
 set -e
+
+usage()
 
 # Core Configuration
 SERVICE_NAME="mcp-fileserver"
@@ -32,15 +45,6 @@ if [ -f "$SYSTEMD_PATH" ]; then
     fi
 fi
 
-# Helper for showing script usage instructions
-usage() {
-    echo "Usage: sudo $0 [-w wheel_file] [-i ip_address] [-p port] [-f]"
-    echo "  -w: Path to a specific .whl file (optional; auto-detects in 'dist/' if omitted)"
-    echo "  -i: IP address to bind to (default: 127.0.0.1)"
-    echo "  -p: Port number to listen on (default: 8123)"
-    echo "  -f: Force reinstall of the application package"
-    exit 1
-}
 
 # Parse command line flags using getopts
 while getopts "w:i:p:fh" opt; do
@@ -193,14 +197,19 @@ EOF
 
 USER_BASHRC="${REAL_HOME}/.bashrc"
 if [ -f "$USER_BASHRC" ]; then
-    if ! grep -q "alias mcp-fs-maintain=" "$USER_BASHRC"; then
-        echo "Adding local shortcut command to ${USER_BASHRC}..."
-        echo "alias mcp-fs-maintain='${APP_DIR}/.venv/bin/mcp-file-server-maintain'" >> "$USER_BASHRC"
-        chown "${REAL_USER}:${REAL_GROUP}" "$USER_BASHRC"
-        source ~/.bashrc
-    fi
+    # Remove any existing alias for this command to prevent duplicates/stale paths
+    sed -i '/alias mcp-fs-maintain=/d' "$USER_BASHRC"
+    echo "Adding local shortcut command to ${USER_BASHRC}..."
+    echo "alias mcp-fs-maintain='${APP_DIR}/.venv/bin/mcp-fs-maintain'" >> "$USER_BASHRC"
+    chown "${REAL_USER}:${REAL_GROUP}" "$USER_BASHRC"
 fi
-
+source "$USER_BASHRC"
+    
+# To add a link in /usr/local/bin pointing to the client executable
+# The link will be callable by any users
+ln -sf "${APP_DIR}/.venv/bin/mcp-fs-client" "/usr/local/bin/mcp-fs-client"
+chmod o+rx /usr/local/bin/mcp-fs-client
+    
 # Reload systemd, enable, and fire up the engine daemon background layers
 echo "Registering daemon profiles and starting the background service..."
 systemctl daemon-reload
@@ -211,4 +220,5 @@ echo -e "${GREEN}=== Installation Completed Successfully! ===${NC}"
 echo -e "Your daemon is running safely in the background under user '${REAL_USER}'."
 echo -e "-> View operational status:   ${GREEN}sudo systemctl status ${SERVICE_NAME}${NC}"
 echo -e "-> Monitor stream print logs: ${GREEN}sudo journalctl -u ${SERVICE_NAME} -f${NC}"
-echo -e "-> Alias command ready: ${GREEN}mcp-fs-maintain for maintenace${NC}"
+echo -e "-> Maintenance command ready <alias>: ${GREEN}mcp-fs-maintain for maintenace${NC}"
+echo -e "-> Client command ready <link>: ${GREEN}mcp-fs-client for client iterative operations${NC}"

@@ -129,6 +129,7 @@ def write_file(path: str, content: str) -> tuple[bool, str]:
         logging.error(f"Failed to write file '{path}': {e}")
         return False, f"Error: Failed to write file. {str(e)}"
 
+
 # --- Tool #4: move_file ---
 @mcp.tool()
 def move_file(source_path: str, destination_path: str) -> tuple[bool, str]:
@@ -219,7 +220,40 @@ def list_dir(path: str = ".", recursive: bool = False) -> tuple[bool, str, list[
     except Exception as e:
         return False, f"Error: Failed to list directory. {str(e)}", []
 
-def run_server(host: str = "127.0.0.1", port: int = 8123) -> None:
+# --- Tool #6: query_file ---
+@mcp.tool()
+def query_file(path: str) -> tuple[bool, dict]:
+    """
+    Query information about a file inside the confined folder.
+    Args:
+        path (str): The relative path from the server root path.
+    Returns: tuple[bool, dict]
+        bool: True if the operation was successful, False otherwise.
+        dict: A dictionary containing file information or error details.
+             {"message": "<description of the result>", "filesize": <int or None>, "allow_overwrite": <bool>}
+    """
+    try:
+        file = resolve(path)
+        if not file.exists():
+            return False, {"message": "File does not exist.", "filesize": None, "allow_overwrite": False}
+        if not file.is_file():
+            return False, {"message": "Path is not a file.", "filesize": None, "allow_overwrite": False}
+        if file == MCP_FS_PRIVATE_DIR or MCP_FS_PRIVATE_DIR in file.parents:
+            return False, {"message": "Query to private directory is denied.", "filesize": None, "allow_overwrite": False}
+        filesize = file.stat().st_size
+        current_actual_content = file.read_bytes()
+        current_checksum = calculate_bytes_checksum(current_actual_content)
+        last_recorded_checksum = db.get_checksum(str(file)) 
+        if current_checksum != last_recorded_checksum:
+            file_allow_overwrite = False
+        else:
+            file_allow_overwrite = True
+        return True, {"message": "Queried successfully.", "filesize": filesize, "allow_overwrite": file_allow_overwrite}
+    except Exception as e:
+        return False, {"message": "Failed to query file.", "filesize": None, "allow_overwrite": False}
+
+
+def run_server(host: str, port: int) -> None:
     global MCP_FS_ROOT_DIR
     # Validate the host and port
     if not isinstance(host, str) or not host:
@@ -232,4 +266,11 @@ def run_server(host: str = "127.0.0.1", port: int = 8123) -> None:
     mcp.run(transport="streamable-http",**kwargs)
 
 if __name__ == "__main__":
-    run_server()
+    import sys
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <host> <port>")
+        print("host=127.0.0.1 to bind to localhost, 0.0.0.0 to bind to all interfaces.")
+        sys.exit(1)
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+    run_server(host, port)

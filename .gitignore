@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.bin
 *.egg-info/
 dist/
 build/
@@ -19,3 +20,10 @@ ENV/
 
 # Test data directory
 test/test_dir/
+
+# Nuitka compiler outputs
+*.dist/
+*.build/
+
+# Root configuration files 
+mcp-server-config.json

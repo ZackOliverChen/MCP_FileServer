@@ -1,6 +1,6 @@
 ### MCP File Server
 
-A simple file service program designed to stream files locally or remotely.
+A simple file service program designed to stream files locally or remotely. It is also packed with a client operation tool <mcp_fs_client.py>.
 
 #### Core Use Case
 This program was originally built to copy files between an **OpenClaw** sandbox and the host environment. For safety reasons, OpenClaw is usually intentionally installed under a non-admin user account. 
