@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 name = "mcp_fs"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
     "mcp[cli]>=0.1.0",
     "socksio>=0.5.0"
@@ -33,6 +33,6 @@ build-backend = "setuptools.build_meta"
 
 
 [project.scripts]
-mcp-file-server = "mcp_fs.mcp_fs_server:run_server"
+mcp-file-server = "mcp_fs.mcp_fs_server:main"
 mcp-fs-maintain = "mcp_fs.checksumdb_maintain:db_maintain_cli"
 mcp-fs-client = "mcp_fs.mcp_fs_client:client"

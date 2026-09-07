@@ -130,6 +130,62 @@ def write_file(path: str, content: str) -> tuple[bool, str]:
         return False, f"Error: Failed to write file. {str(e)}"
 
 
+@mcp.tool()
+def write_file_chunk(path: str, chunk_base64: str, offset: int, is_last: bool = False) -> tuple[bool, str]:
+    """
+    Write a file in base64-encoded chunks to support large uploads.
+    Args:
+        path (str): The relative path from the server root path.
+        chunk_base64 (str): Base64-encoded chunk content.
+        offset (int): Byte offset where this chunk should be written.
+        is_last (bool): True when this is the last chunk.
+    Returns: tuple[bool, str]
+        bool: A boolean indicating success.
+        str: Result message or error details.
+    """
+    try:
+        target = resolve(path)
+
+        if offset < 0:
+            return False, "Error: Invalid chunk offset."
+
+        try:
+            file_bytes = base64.b64decode(chunk_base64, validate=True)
+        except Exception:
+            return False, "Error: Invalid base64 chunk payload."
+
+        if offset == 0:
+            if target.exists():
+                last_recorded_checksum = db.get_checksum(str(target))
+                if last_recorded_checksum is None:
+                    return False, "Error: Cannot overwrite file. The file may have been created externally."
+
+                current_actual_content = target.read_bytes()
+                current_checksum = calculate_bytes_checksum(current_actual_content)
+                if current_checksum != last_recorded_checksum:
+                    return False, "Error: Cannot overwrite file. The file may have been modified externally."
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as output:
+                output.write(file_bytes)
+        else:
+            if not target.exists():
+                return False, "Error: Chunk write state is missing. Start upload from offset 0."
+            with target.open("r+b") as output:
+                output.seek(offset)
+                output.write(file_bytes)
+
+        if is_last:
+            final_bytes = target.read_bytes()
+            db.save_checksum(str(target), calculate_bytes_checksum(final_bytes))
+            return True, "File written successfully."
+
+        return True, "Chunk written successfully."
+    except Exception as e:
+        logging.error(f"Failed to write chunk for '{path}': {e}")
+        return False, f"Error: Failed to write file chunk. {str(e)}"
+
+
 # --- Tool #4: move_file ---
 @mcp.tool()
 def move_file(source_path: str, destination_path: str) -> tuple[bool, str]:
@@ -253,6 +309,8 @@ def query_file(path: str) -> tuple[bool, dict]:
         return False, {"message": "Failed to query file.", "filesize": None, "allow_overwrite": False}
 
 
+import sys
+
 def run_server(host: str, port: int) -> None:
     global MCP_FS_ROOT_DIR
     # Validate the host and port
@@ -263,14 +321,29 @@ def run_server(host: str, port: int) -> None:
     print(f"mcp-fileserver serving {MCP_FS_ROOT_DIR} -> http://{host}:{port}/mcp")
 
     kwargs = {"host": host, "port": port}
-    mcp.run(transport="streamable-http",**kwargs)
+    mcp.run(transport="streamable-http", **kwargs)
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <host> <port>")
+def main() -> None:
+    # Get all command line arguments excluding the script name
+    raw_args = sys.argv[1:]
+    
+    # Strip away '--host' or '--port' flags if passed by systemd
+    clean_args = [arg for arg in raw_args if arg not in ("--host", "--port")]
+    
+    if len(clean_args) != 2:
+        print("Usage: mcp-file-server <host> <port>")
+        print("Alternatively: mcp-file-server --host <host> --port <port>")
         print("host=127.0.0.1 to bind to localhost, 0.0.0.0 to bind to all interfaces.")
         sys.exit(1)
-    host = sys.argv[1]
-    port = int(sys.argv[2])
+        
+    host = clean_args[0]
+    try:
+        port = int(clean_args[1])
+    except ValueError:
+        print(f"Error: Invalid port '{clean_args[1]}'. Port must be an integer.")
+        sys.exit(1)
+        
     run_server(host, port)
+
+if __name__ == "__main__":
+    main()

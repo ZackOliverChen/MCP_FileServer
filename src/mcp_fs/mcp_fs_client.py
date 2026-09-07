@@ -20,6 +20,7 @@ GREEN = "\033[0;32m"
 BLUE = "\033[0;34m"
 YELLOW = "\033[0;33m"
 RESET = "\033[0m"
+MAX_INLINE_PUT_BYTES = 2 * 1024 * 1024
 
 
 def _normalize_rel_path(path: str) -> str:
@@ -104,6 +105,36 @@ def _local_file_content(path: str) -> str:
         return f"data:{mime_type or 'application/octet-stream'};base64,{encoded}"
 
 
+async def _put_file_chunked(url: str, local_path: str, remote_path: str, chunk_size: int = 512 * 1024) -> tuple[bool, str]:
+    offset = 0
+    with open(local_path, "rb") as input_file:
+        while True:
+            chunk = input_file.read(chunk_size)
+            if not chunk:
+                result = await _connect_and_call(
+                    url,
+                    "write_file_chunk",
+                    path=remote_path,
+                    chunk_base64="",
+                    offset=offset,
+                    is_last=True,
+                )
+                return _read_result(result)
+
+            result = await _connect_and_call(
+                url,
+                "write_file_chunk",
+                path=remote_path,
+                chunk_base64=base64.b64encode(chunk).decode("ascii"),
+                offset=offset,
+                is_last=False,
+            )
+            success, message = _read_result(result)
+            if not success:
+                return False, message
+            offset += len(chunk)
+
+
 def _decode_tool_payload(result: Any) -> Any:
     text = _format_tool_result(result).strip()
     if not text:
@@ -143,6 +174,22 @@ def _is_truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "y"}
     return False
+
+
+def _format_exception_message(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        messages: list[str] = []
+        stack: list[BaseExceptionGroup] = [exc]
+        while stack:
+            current = stack.pop()
+            for sub_exc in current.exceptions:
+                if isinstance(sub_exc, BaseExceptionGroup):
+                    stack.append(sub_exc)
+                else:
+                    messages.append(f"{type(sub_exc).__name__}: {sub_exc}")
+        if messages:
+            return "; ".join(messages)
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _connect_and_call(url: str, tool_name: str, **arguments: Any) -> Any:
@@ -408,12 +455,26 @@ async def _run_command(
             return remote_dir, local_dir
         try:
             remote_path = _remote_path(remote_dir, args[1])
-            content = _local_file_content(local_path)
+            local_size = os.path.getsize(local_path)
         except (OSError, UnicodeError, ValueError) as exc:
             print(f"{RED}put: {exc}{RESET}")
             return remote_dir, local_dir
-        result = await _connect_and_call(url, "write_file", path=remote_path, content=content)
-        success, message = _read_result(result)
+
+        if local_size > MAX_INLINE_PUT_BYTES:
+            try:
+                success, message = await _put_file_chunked(url, local_path, remote_path)
+            except Exception as exc:
+                print(f"{RED}put: {_format_exception_message(exc)}{RESET}")
+                return remote_dir, local_dir
+        else:
+            try:
+                content = _local_file_content(local_path)
+                result = await _connect_and_call(url, "write_file", path=remote_path, content=content)
+                success, message = _read_result(result)
+            except Exception as exc:
+                print(f"{RED}put: {_format_exception_message(exc)}{RESET}")
+                return remote_dir, local_dir
+
         if success:
             _add_remote_file(remote_path, directories, files)
         else:
@@ -497,17 +558,23 @@ async def _interactive(url: str) -> None:
         except ValueError as exc:
             print(f"Parse error: {exc}")
             continue
-        remote_dir, local_dir = await _run_command(
-            url, remote_dir, local_dir, directories, files, parts[0], parts[1:]
-        )
+        try:
+            remote_dir, local_dir = await _run_command(
+                url, remote_dir, local_dir, directories, files, parts[0], parts[1:]
+            )
+        except Exception as exc:
+            print(f"{RED}{parts[0]}: {_format_exception_message(exc)}{RESET}")
 
 
 async def _run_once(url: str, command: str | None, args: list[str]) -> None:
     if command is None:
         await _interactive(url)
         return
-    directories, files = await _build_remote_tree(url)
-    await _run_command(url, ".", os.getcwd(), directories, files, command, args)
+    try:
+        directories, files = await _build_remote_tree(url)
+        await _run_command(url, ".", os.getcwd(), directories, files, command, args)
+    except Exception as exc:
+        print(f"{RED}{command}: {_format_exception_message(exc)}{RESET}")
 
 
 def client() -> None:
